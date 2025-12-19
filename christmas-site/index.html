@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Merry Christmas - 粒子特效</title>
+    <style>
+        /* --- 1. 沉浸式 UI 设计 (复刻截图风格) --- */
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Helvetica', sans-serif; user-select: none; -webkit-tap-highlight-color: transparent; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        
+        /* 界面覆盖层 */
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10;
+            pointer-events: none; /* 让点击穿透到 Canvas */
+            display: flex; flex-direction: column; justify-content: space-between;
+        }
+
+        /* 顶部标题 */
+        .header {
+            text-align: center; margin-top: 5vh;
+            color: #d4af37; /* 香槟金 */
+            font-size: clamp(24px, 5vw, 48px); /* 响应式字体 */
+            font-weight: 300; letter-spacing: 5px; text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(212, 175, 55, 0.5);
+            font-family: "Times New Roman", serif;
+        }
+
+        /* 左下角控制区 */
+        .controls {
+            pointer-events: auto;
+            margin: 20px;
+            display: flex; flex-direction: column; gap: 15px;
+            align-items: flex-start;
+        }
+
+        /* 金色按钮样式 */
+        .btn {
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid #d4af37;
+            color: #d4af37;
+            padding: 10px 20px;
+            font-size: 14px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.3s;
+            backdrop-filter: blur(4px);
+            text-align: center;
+            min-width: 120px;
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .btn:hover { background: rgba(212, 175, 55, 0.2); box-shadow: 0 0 15px rgba(212, 175, 55, 0.3); }
+        .btn:active { transform: scale(0.95); }
+
+        /* 隐藏的文件输入框 */
+        input[type="file"] { display: none; }
+
+        /* 摄像头小窗口 */
+        #video-feedback {
+            position: absolute; bottom: 20px; right: 20px;
+            width: 120px; height: 90px;
+            border: 1px solid #333; border-radius: 8px;
+            transform: scaleX(-1); opacity: 0; transition: opacity 0.5s;
+            object-fit: cover;
+        }
+        #video-feedback.active { opacity: 0.8; border-color: #d4af37; }
+
+        /* 加载提示 */
+        #loader {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #d4af37; font-size: 14px; pointer-events: none; transition: opacity 0.5s;
+        }
+    </style>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.9.1/gsap.min.js"></script>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div id="loader">正在初始化...</div>
+
+    <div id="ui-layer">
+        <div class="header">Merry Christmas</div>
+        
+        <div class="controls">
+            <button class="btn" onclick="triggerShape('tree')">🎄 圣诞树</button>
+            <button class="btn" onclick="triggerShape('sphere')">💥 粒子爆炸</button>
+            
+            <button class="btn" onclick="document.getElementById('img-upload').click()">
+                🖼️ 添加照片
+            </button>
+            <input type="file" id="img-upload" accept="image/*">
+
+            <button class="btn" onclick="document.getElementById('music-upload').click()">
+                🎵 添加音乐
+            </button>
+            <input type="file" id="music-upload" accept="audio/*">
+        </div>
+    </div>
+    
+    <video id="video-feedback" playsinline muted></video>
+
+    <script>
+        // --- 核心配置 ---
+        const CONFIG = {
+            particleCount: 15000, // 粒子数量 (手机端可适当减少)
+            particleSize: 2.0,
+            color: 0xd4af37, // 金色
+            imgSize: 200 // 图像采样大小
+        };
+
+        let scene, camera, renderer, particles, geometry;
+        let targetPositions = []; // 目标位置数组
+        let currentPositions = []; // 当前位置数组
+        let colors = [];
+        let mouse = new THREE.Vector2();
+        let isMouseDown = false;
+        let windowHalfX = window.innerWidth / 2;
+        let windowHalfY = window.innerHeight / 2;
+        
+        // 音频分析
+        let audioContext, analyser, dataArray;
+        let isAudioPlaying = false;
+
+        init();
+        animate();
+
+        function init() {
+            // 1. Three.js 基础设置
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.002);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 3000);
+            camera.position.z = 600;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            container.appendChild(renderer.domElement);
+
+            // 2. 粒子系统初始化
+            geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(CONFIG.particleCount * 3);
+            const initialColors = new Float32Array(CONFIG.particleCount * 3);
+            
+            // 初始随机位置
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                positions[i * 3] = (Math.random() * 2000) - 1000;
+                positions[i * 3 + 1] = (Math.random() * 2000) - 1000;
+                positions[i * 3 + 2] = (Math.random() * 2000) - 1000;
+                
+                // 默认金色
+                const color = new THREE.Color(CONFIG.color);
+                initialColors[i * 3] = color.r;
+                initialColors[i * 3 + 1] = color.g;
+                initialColors[i * 3 + 2] = color.b;
+
+                // 记录当前位置
+                currentPositions.push(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(initialColors, 3));
+
+            // 材质
+            const material = new THREE.PointsMaterial({
+                size: CONFIG.particleSize,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                depthTest: false,
+                transparent: true,
+                opacity: 0.8
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            // 3. 事件监听
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousemove', onDocumentMouseMove);
+            
+            // 手机触屏支持
+            document.addEventListener('touchstart', onTouchStart, {passive: false});
+            document.addEventListener('touchmove', onTouchMove, {passive: false});
+
+            // 文件上传监听
+            document.getElementById('img-upload').addEventListener('change', handleImageUpload);
+            document.getElementById('music-upload').addEventListener('change', handleMusicUpload);
+
+            // 初始形状：圣诞树
+            document.getElementById('loader').style.opacity = 0;
+            createTreeShape();
+        }
+
+        // --- 形状生成器 ---
+
+        // 1. 圣诞树
+        function createTreeShape() {
+            targetPositions = [];
+            const count = CONFIG.particleCount;
+            for (let i = 0; i < count; i++) {
+                const angle = i * 0.1;
+                const radius = 200 * (1 - i / count); // 下大上小
+                const x = radius * Math.cos(angle);
+                const y = (i / count) * 400 - 200; // 高度分布
+                const z = radius * Math.sin(angle);
+                targetPositions.push({x, y, z, r: 1, g: 0.84, b: 0}); // 默认金色
+                
+                // 随机点缀红色 (圣诞球)
+                if (Math.random() > 0.95) {
+                    targetPositions[i].r = 1; targetPositions[i].g = 0; targetPositions[i].b = 0;
+                }
+            }
+            transitionToShape();
+        }
+
+        // 2. 爆炸球体
+        function triggerShape(type) {
+            if (type === 'tree') {
+                createTreeShape();
+                return;
+            }
+            
+            // Sphere
+            targetPositions = [];
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                const r = 300;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                
+                targetPositions.push({
+                    x: r * Math.sin(phi) * Math.cos(theta),
+                    y: r * Math.sin(phi) * Math.sin(theta),
+                    z: r * Math.cos(phi),
+                    r: Math.random(), g: Math.random(), b: Math.random() // 彩色
+                });
+            }
+            transitionToShape();
+        }
+
+        // 3. 处理照片上传 (像素映射)
+        function handleImageUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.src = event.target.result;
+                img.onload = function() {
+                    sampleImage(img);
+                };
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function sampleImage(image) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = CONFIG.imgSize;
+            canvas.height = CONFIG.imgSize;
+            ctx.drawImage(image, 0, 0, CONFIG.imgSize, CONFIG.imgSize);
+            
+            const imgData = ctx.getImageData(0, 0, CONFIG.imgSize, CONFIG.imgSize);
+            const data = imgData.data;
+            
+            targetPositions = [];
+            let pIndex = 0;
+
+            // 遍历像素
+            for (let y = 0; y < CONFIG.imgSize; y++) {
+                for (let x = 0; x < CONFIG.imgSize; x++) {
+                    const i = (y * CONFIG.imgSize + x) * 4;
+                    const alpha = data[i + 3];
+                    
+                    if (alpha > 128) { // 只取不透明的像素
+                        if (pIndex < CONFIG.particleCount) {
+                            targetPositions.push({
+                                x: (x - CONFIG.imgSize/2) * 3, // 缩放并居中
+                                y: -(y - CONFIG.imgSize/2) * 3, // Y轴反转
+                                z: 0,
+                                r: data[i] / 255,
+                                g: data[i+1] / 255,
+                                b: data[i+2] / 255
+                            });
+                            pIndex++;
+                        }
+                    }
+                }
+            }
+            transitionToShape();
+        }
+
+        // --- 动画与过渡 ---
+        function transitionToShape() {
+            // 使用 GSAP 或简单的 lerp，这里为了性能手写简单的过渡逻辑
+            // 实际上在 animate 循环中会不断逼近 targetPositions
+        }
+
+        function handleMusicUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const audio = new Audio();
+            audio.src = URL.createObjectURL(file);
+            audio.crossOrigin = "anonymous";
+            audio.play();
+            
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                const source = audioContext.createMediaElementSource(audio);
+                source.connect(analyser);
+                analyser.connect(audioContext.destination);
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                isAudioPlaying = true;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const positions = geometry.attributes.position.array;
+            const colorsAttr = geometry.attributes.color.array;
+            
+            let audioScale = 1;
+            if (isAudioPlaying) {
+                analyser.getByteFrequencyData(dataArray);
+                const avg = dataArray.reduce((a,b)=>a+b,0) / dataArray.length;
+                audioScale = 1 + (avg / 256) * 0.5; // 音乐律动系数
+            }
+
+            // 粒子移动核心逻辑
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                if (targetPositions[i]) {
+                    const idx = i * 3;
+                    const target = targetPositions[i];
+                    
+                    // 1. 位置插值 (Lerp) - 让粒子飞向目标
+                    positions[idx] += (target.x * audioScale - positions[idx]) * 0.05;
+                    positions[idx+1] += (target.y * audioScale - positions[idx+1]) * 0.05;
+                    positions[idx+2] += (target.z * audioScale - positions[idx+2]) * 0.05;
+
+                    // 2. 颜色插值
+                    colorsAttr[idx] += (target.r - colorsAttr[idx]) * 0.05;
+                    colorsAttr[idx+1] += (target.g - colorsAttr[idx+1]) * 0.05;
+                    colorsAttr[idx+2] += (target.b - colorsAttr[idx+2]) * 0.05;
+                }
+            }
+
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+
+            // 场景交互旋转
+            const time = Date.now() * 0.0005;
+            scene.rotation.y += 0.002; // 自动自转
+            
+            // 鼠标/手指交互视差
+            camera.position.x += (mouse.x * 200 - camera.position.x) * 0.05;
+            camera.position.y += (-mouse.y * 200 - camera.position.y) * 0.05;
+            camera.lookAt(scene.position);
+
+            renderer.render(scene, camera);
+        }
+
+        // --- 交互处理 (手机 + PC) ---
+        function onWindowResize() {
+            windowHalfX = window.innerWidth / 2;
+            windowHalfY = window.innerHeight / 2;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onDocumentMouseMove(event) {
+            mouse.x = (event.clientX - windowHalfX) / 2;
+            mouse.y = (event.clientY - windowHalfY) / 2;
+        }
+
+        // 手机触摸逻辑
+        function onTouchStart(event) {
+            if (event.touches.length === 1) {
+                event.preventDefault();
+                mouse.x = (event.touches[0].pageX - windowHalfX) / 2;
+                mouse.y = (event.touches[0].pageY - windowHalfY) / 2;
+            }
+        }
+
+        function onTouchMove(event) {
+            if (event.touches.length === 1) {
+                event.preventDefault();
+                mouse.x = (event.touches[0].pageX - windowHalfX) / 2;
+                mouse.y = (event.touches[0].pageY - windowHalfY) / 2;
+            }
+        }
+    </script>
+</body>
+</html>
